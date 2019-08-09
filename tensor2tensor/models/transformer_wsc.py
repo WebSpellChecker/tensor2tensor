@@ -65,7 +65,7 @@ def add_positional_embedding(x, max_length, pos_embd, positions=None):
       pad_length = tf.maximum(0, length - max_length)
       sliced = tf.cond(
           tf.less(length, max_length),
-          lambda: tf.slice(var, [0, 0], [length, -1]),
+          lambda: tf.slice(var, [0, 0], [length, depth]),
           lambda: tf.pad(var, [[0, pad_length], [0, 0]]))
       return x + tf.expand_dims(sliced, 0)
     else:
@@ -127,12 +127,6 @@ class TransformerWSC(transformer.Transformer):
                 common_layers.shape_list(inputs)[1])
 
         encoder_input = add_positional_embedding(encoder_input, self.hparams.max_length, self.pos_embd, inputs_position)
-        # Add type embeddings
-        if type_ids is not None:
-            if not num_types:
-                raise ValueError("Need to set num_types as well.")
-            encoder_input = common_attention.add_positional_embedding(
-                encoder_input, num_types, "inputs_type_embedding", type_ids)
 
         encoder_self_attention_bias = common_layers.cast_like(
             encoder_self_attention_bias, encoder_input)
