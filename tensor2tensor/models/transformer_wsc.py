@@ -62,11 +62,8 @@ def add_positional_embedding(x, max_length, pos_embd, positions=None):
     tf.cast(pos_embd, x.dtype)
     var = pos_embd
     if positions is None:
-      pad_length = tf.maximum(0, length - max_length)
-      sliced = tf.cond(
-          tf.less(length, max_length),
-          lambda: tf.slice(var, [0, 0], [length, depth]),
-          lambda: tf.pad(var, [[0, pad_length], [0, 0]]))
+      # pad_length = tf.maximum(0, length - max_length)
+      sliced = tf.slice(var, [0, 0], [length, depth])
       return x + tf.expand_dims(sliced, 0)
     else:
       return x + tf.gather(var, tf.to_int32(positions))
