@@ -184,12 +184,13 @@ class TransformerWSC(transformer.Transformer):
                 decoder_input, targets_position)
         else:
             decoder_input = common_attention.add_timing_signal_1d(decoder_input)
-
         spans = features["spans"]
         pos_embd = tf.cast(self.pos_embd, decoder_input.dtype)
         spans_sign = tf.cast(tf.expand_dims(tf.sign(spans), [-1]),  decoder_input.dtype)
         spans_embd = tf.gather(pos_embd, tf.to_int32(spans))
         spans_embd = spans_embd * spans_sign
+        #Pad like decoder_input
+        spans_embd = common_layers.shift_right_3d(spans_embd, pad)
         decoder_input += spans_embd
 
         if hparams.activation_dtype == "bfloat16":
