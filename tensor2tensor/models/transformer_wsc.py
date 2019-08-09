@@ -80,7 +80,7 @@ class TransformerWSC(transformer.Transformer):
         super(TransformerWSC, self).__init__(*args, **kwargs)
         self._prepare_encoder_fn = self.prepare_encoder_fn
         self._prepare_decoder_fn = self.prepare_decoder_fn
-        with tf.name_scope("add_positional_embedding"):
+        with tf.name_scope("positional_embedding"):
             self.pos_embd = tf.get_variable("inputs_positional_embedding",
                                             [self.hparams.max_length, self.hparams.hidden_size])
         #if
@@ -126,13 +126,7 @@ class TransformerWSC(transformer.Transformer):
             encoder_self_attention_bias += common_attention.attention_bias_proximal(
                 common_layers.shape_list(inputs)[1])
 
-        encoder_input = add_positional_embedding(encoder_input, self.hparams.max_length, self.pos_embd, inputs_position)
-        # Add type embeddings
-        if type_ids is not None:
-            if not num_types:
-                raise ValueError("Need to set num_types as well.")
-            encoder_input = common_attention.add_positional_embedding(
-                encoder_input, num_types, "inputs_type_embedding", type_ids)
+        #encoder_input = add_positional_embedding(encoder_input, self.hparams.max_length, self.pos_embd, inputs_position)
 
         encoder_self_attention_bias = common_layers.cast_like(
             encoder_self_attention_bias, encoder_input)
