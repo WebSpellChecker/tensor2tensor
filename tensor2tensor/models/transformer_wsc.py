@@ -65,7 +65,7 @@ def add_positional_embedding(x, max_length, pos_embd, positions=None):
       pad_length = tf.maximum(0, length - max_length)
       sliced = tf.cond(
           tf.less(length, max_length),
-          lambda: tf.slice(var, [0, 0], [length, -1]),
+          lambda: tf.slice(var, [0, 0], [length, depth]),
           lambda: tf.pad(var, [[0, pad_length], [0, 0]]))
       return x + tf.expand_dims(sliced, 0)
     else:
