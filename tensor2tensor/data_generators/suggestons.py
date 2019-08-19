@@ -28,10 +28,12 @@ from tensor2tensor.data_generators import generator_utils
 from tensor2tensor.data_generators import problem
 from tensor2tensor.data_generators import text_encoder
 from tensor2tensor.data_generators import text_problems
+from tensor2tensor.data_generators.text_encoder import TextEncoder
 from tensor2tensor.layers import modalities
 from tensor2tensor.utils import bleu_hook
 from tensor2tensor.utils import mlperf_log
 from tensor2tensor.utils import registry
+from tensor2tensor.utils import tokenization
 
 import tensorflow as tf
 
@@ -70,7 +72,12 @@ class Suggestions(text_problems.Text2TextProblem):
         return self.source_data_files(problem.DatasetSplit.TRAIN)
 
     def get_or_create_vocab(self, data_dir, tmp_dir, force_get=False):
-        return dotdict({"vocab_size": 28996})
+        vocab_file = os.path.join(data_dir, 'vocab.txt')
+        if(os.path.exists(vocab_file)):
+            encoder = BERTEncoder(os.path.join(data_dir, 'vocab.txt'))
+        else:
+            encoder = dotdict({"vocab_size": 28996})
+        return encoder
 
     def filepattern(self, data_dir, mode, shard=None):
         return "%s/*.tfrecord" % (data_dir)
@@ -97,7 +104,19 @@ class Suggestions(text_problems.Text2TextProblem):
     def hparams(self, defaults, unused_model_hparams):
         p = defaults
         p.stop_at_eos = int(True)
-
+        te = text_encoder
+        te.PAD = "[PAD]"
+        te.SEP = "[SEP]"
+        te.CLS = "[CLS]"
+        te.DEL = "[unused99]"
+        te.EOS = "[unused100]"
+        te.RESERVED_TOKENS = [te.PAD, te.SEP, te.CLS, te.DEL, te.EOS]
+        te.NUM_RESERVED_TOKENS = len(te.RESERVED_TOKENS)
+        te.PAD_ID = 0
+        te.SEP_ID = 102
+        te.CLS_ID = 101
+        te.DEL_ID = 99
+        te.EOS_ID = 104
         p.modality = {"targets": modalities.ModalityType.SYMBOL}
         p.vocab_size = {"targets": self._encoders["targets"].vocab_size}
         if self.has_inputs:
@@ -106,3 +125,76 @@ class Suggestions(text_problems.Text2TextProblem):
         p.max_length = unused_model_hparams.max_length
         p.max_input_seq_length = unused_model_hparams.max_input_seq_length
         p.max_target_seq_length = unused_model_hparams.max_target_seq_length
+
+
+class BERTEncoder(TextEncoder):
+    """Base class for converting from ints to/from human readable strings."""
+
+    def __init__(self, vocab_file, num_reserved_ids=0):
+        super(BERTEncoder, self).__init__()
+        self.tokenizer = tokenization.FullTokenizer(vocab_file=vocab_file, do_lower_case=False)
+        self._num_reserved_ids = num_reserved_ids
+
+    @property
+    def num_reserved_ids(self):
+        return self._num_reserved_ids
+
+    def encode(self, s):
+
+        """Transform a human-readable string into a sequence of int ids.
+
+        The ids should be in the range [num_reserved_ids, vocab_size). Ids [0,
+        num_reserved_ids) are reserved.
+
+        EOS is not appended.
+
+        Args:
+          s: human-readable string to be converted.
+
+        Returns:
+          ids: list of integers
+        """
+        s_tkn = [text_encoder.CLS] + self.tokenizer.tokenize(s) + [text_encoder.SEP]
+        return self.tokenizer.convert_tokens_to_ids(s_tkn)
+
+    def decode(self, ids, strip_extraneous=False):
+        """Transform a sequence of int ids into a human-readable string.
+
+        EOS is not expected in ids.
+
+        Args:
+          ids: list of integers to be converted.
+          strip_extraneous: bool, whether to strip off extraneous tokens
+            (EOS and PAD).
+
+        Returns:
+          s: human-readable string.
+        """
+        if strip_extraneous:
+            ids = strip_ids(ids, list(range(self._num_reserved_ids or 0)))
+        return " ".join(self.decode_list(ids))
+
+    def decode_list(self, ids):
+        """Transform a sequence of int ids into a their string versions.
+
+        This method supports transforming individual input/output ids to their
+        string versions so that sequence to/from text conversions can be visualized
+        in a human readable format.
+
+        Args:
+          ids: list of integers to be converted.
+
+        Returns:
+          strs: list of human-readable string.
+        """
+        decoded_ids = []
+        for id_ in ids:
+            if 0 <= id_ < self._num_reserved_ids:
+                decoded_ids.append(RESERVED_TOKENS[int(id_)])
+            else:
+                decoded_ids.append(id_ - self._num_reserved_ids)
+        return [str(d) for d in decoded_ids]
+
+    @property
+    def vocab_size(self):
+        return 28996
