@@ -26,6 +26,9 @@ description of the model and the results obtained with its early version.
 from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
+
+import sys
+
 from six.moves import range  # pylint: disable=redefined-builtin
 import tensorflow_probability as tfp
 
@@ -175,6 +178,7 @@ class TransformerWSC(transformer.Transformer):
         """
         ishape_static = inputs.shape.as_list()
         encoder_input = inputs
+        tf.logging.info('Batch_size = ', ishape_static[0])
         encoder_padding = common_attention.embedding_to_padding(encoder_input)
         ignore_padding = common_attention.attention_bias_ignore_padding(
             encoder_padding)
