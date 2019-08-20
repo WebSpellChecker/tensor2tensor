@@ -301,6 +301,8 @@ def create_estimator(model_name,
     batch_size = (
         problem.tpu_batch_size_per_shard(hparams) *
         run_config.tpu_config.num_shards)
+
+    print("BATCH_SIZE = ", hparams.batch_size)
     mlperf_log.transformer_print(
         key=mlperf_log.INPUT_BATCH_SIZE, value=batch_size)
     if getattr(hparams, "mtf_mode", False):
@@ -362,7 +364,6 @@ def create_estimator(model_name,
       estimator_model_fn = tpu_model_fn
     else:
       raise ValueError("Flag export_saved_model_api_version must be 1 or 2.")
-    print("BATCH_SIZE = ", batch_size)
     estimator = tf.contrib.tpu.TPUEstimator(
         model_fn=estimator_model_fn,
         model_dir=run_config.model_dir,
