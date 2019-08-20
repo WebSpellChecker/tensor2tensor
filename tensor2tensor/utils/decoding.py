@@ -166,6 +166,7 @@ def decode_from_file(estimator,
     has_input = "inputs" in p_hp.vocabulary
     inputs_vocab_key = "inputs" if has_input else "targets"
     inputs_vocab = p_hp.vocabulary[inputs_vocab_key]
+    print('VOCAB', inputs_vocab)
     targets_vocab = p_hp.vocabulary["targets"]
     problem_name = FLAGS.problem
     filename = _add_shard_to_filename(filename, decode_hp)
