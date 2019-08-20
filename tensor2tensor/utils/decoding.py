@@ -183,6 +183,7 @@ def decode_from_file(estimator,
 
     if estimator.config.use_tpu:
         length = getattr(hparams, "length", 0) or hparams.max_length
+        print('decoder input max length', length)
         batch_ids = []
         for line in sorted_inputs:
             if has_input:
