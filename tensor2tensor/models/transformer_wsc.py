@@ -178,7 +178,6 @@ class TransformerWSC(transformer.Transformer):
         """
         ishape_static = inputs.shape.as_list()
         encoder_input = inputs
-        tf.logging.info('Batch_size = ', ishape_static[0])
         encoder_padding = common_attention.embedding_to_padding(encoder_input)
         ignore_padding = common_attention.attention_bias_ignore_padding(
             encoder_padding)
@@ -298,6 +297,7 @@ class TransformerWSC(transformer.Transformer):
         ret = super(TransformerWSC, self).body(features)
         spans = features["spans"]
         span_logits = self.get_span_logits(self.attention_weights)
+        print('BATCH SIZE', span_logits.shape[0])
         span_loss, span_weight = common_layers.padded_cross_entropy(
             span_logits,
             spans,
