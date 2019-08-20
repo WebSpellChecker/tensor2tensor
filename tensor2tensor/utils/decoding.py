@@ -115,8 +115,8 @@ def string_bert_to_nlp(text):
 
 def result_to_text(result, text_encoder, tokenizer):
     te = text_encoder
-    outputs = result['outputs'].tolist()
-    spans = result['spans'].tolist()
+    outputs = np.squeeze(result['outputs']).tolist()
+    spans = np.squeeze(result['spans']).tolist()
     if te.EOS_ID in outputs:
         last_out_idx = outputs.index(te.EOS_ID)
         outputs = outputs[:last_out_idx]
@@ -137,7 +137,7 @@ def result_to_text(result, text_encoder, tokenizer):
                 edits[-1]["spans"].append(span)
             edits.append({"sugg": [], "spans": []})
     edits = edits[:-1]
-    src_tokens = result["inputs"][:, 0].tolist()
+    src_tokens = np.squeeze(result["inputs"]).tolist()
     last_token_idx = src_tokens.index(te.SEP_ID)
     src_tokens = tokenizer.convert_ids_to_tokens(src_tokens[:last_token_idx])
     trg_tokens = src_tokens[:]
