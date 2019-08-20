@@ -769,6 +769,7 @@ def fast_decode_tpu(encoder_output,
         def compute_cache_shape_invariants(tensor):
             return tf.TensorShape(tensor.shape.as_list())
 
+        bs_shape = batch_size if isinstance(batch_size, int) else None
         _, _, _, decoded_ids, res_cache, log_prob = tf.while_loop(
             is_not_finished,
             inner_loop, [
@@ -777,11 +778,11 @@ def fast_decode_tpu(encoder_output,
             ],
             shape_invariants=[
                 tf.TensorShape([]),
-                tf.TensorShape([None]),
-                tf.TensorShape([None, 1]),
-                tf.TensorShape([None, decode_length]),
+                tf.TensorShape([bs_shape]),
+                tf.TensorShape([bs_shape, 1]),
+                tf.TensorShape([bs_shape, decode_length]),
                 nest.map_structure(compute_cache_shape_invariants, cache),
-                tf.TensorShape([None]),
+                tf.TensorShape([bs_shape]),
             ])
         spans = tf.reshape(res_cache["spans"], [batch_size, decode_length + 1])
         spans = spans[:, 1:]
