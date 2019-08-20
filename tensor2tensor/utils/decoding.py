@@ -235,7 +235,10 @@ def decode_from_file(estimator,
     tokenizer = registry.problem(problem_name).get_or_create_vocab(FLAGS.data_dir, None).tokenizer
     texts = []
     for elapsed_time, result in timer(result_iter):
-        texts.append(result_to_text(result, text_encoder, tokenizer))
+        try:
+            texts.append(result_to_text(result, text_encoder, tokenizer))
+        except Exception as e:
+            raise Exception('Can\'t be processed.', result["inputs"][:, 0].tolist(), e)
         if decode_hp.return_beams: pass
         total_time_per_step += elapsed_time
         total_cnt += 1
