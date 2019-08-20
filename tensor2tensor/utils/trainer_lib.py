@@ -301,8 +301,6 @@ def create_estimator(model_name,
     batch_size = (
         problem.tpu_batch_size_per_shard(hparams) *
         run_config.tpu_config.num_shards)
-
-    print("BATCH_SIZE = ", hparams.batch_size)
     mlperf_log.transformer_print(
         key=mlperf_log.INPUT_BATCH_SIZE, value=batch_size)
     if getattr(hparams, "mtf_mode", False):
