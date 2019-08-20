@@ -238,7 +238,7 @@ def decode_from_file(estimator,
         try:
             texts.append(result_to_text(result, text_encoder, tokenizer))
         except Exception as e:
-            raise Exception('Can\'t be processed.', result["inputs"][:, 0].tolist(), e)
+            raise Exception('Can\'t be processed.', result["inputs"].shape, e)
         if decode_hp.return_beams: pass
         total_time_per_step += elapsed_time
         total_cnt += 1
