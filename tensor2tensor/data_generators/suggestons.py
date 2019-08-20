@@ -73,7 +73,7 @@ class Suggestions(text_problems.Text2TextProblem):
 
     def get_or_create_vocab(self, data_dir, tmp_dir, force_get=False):
         vocab_file = os.path.join(data_dir, 'vocab.txt')
-        if(os.path.exists(vocab_file)):
+        if(tf.io.gfile.exists(vocab_file)):
             encoder = BERTEncoder(os.path.join(data_dir, 'vocab.txt'))
         else:
             encoder = dotdict({"vocab_size": 28996})
