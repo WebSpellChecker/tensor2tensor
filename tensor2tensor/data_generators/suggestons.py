@@ -52,6 +52,10 @@ class Suggestions(text_problems.Text2TextProblem):
     """Base class for translation problems."""
 
     @property
+    def batch_size_means_tokens(self):
+        return False
+
+    @property
     def is_generate_per_split(self):
         return True
 
