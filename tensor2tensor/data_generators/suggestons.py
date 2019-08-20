@@ -67,6 +67,17 @@ class Suggestions(text_problems.Text2TextProblem):
     def datatypes_to_clean(self):
         return None
 
+    def tpu_batch_size_per_shard(self, model_hparams):
+        """Batch size in examples per TPU core.
+
+        Args:
+          model_hparams: model hyperparameters
+        Returns:
+          an integer
+        """
+        print('BATCH SIZE', model_hparams.batch_size)
+        return model_hparams.batch_size
+
     def source_data_files(self, dataset_split):
         """Files to be passed to compile_data."""
         raise NotImplementedError()
