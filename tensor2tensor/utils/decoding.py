@@ -185,7 +185,8 @@ def decode_from_file(estimator,
         batch_ids = []
         for line in sorted_inputs:
             if has_input:
-                ids = inputs_vocab.encode(line.strip())
+                line = line.strip()
+                ids = inputs_vocab.encode(line)
             else:
                 ids = targets_vocab.encode(line)
             if len(ids) < length:
