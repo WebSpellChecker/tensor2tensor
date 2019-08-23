@@ -278,7 +278,7 @@ class TransformerWSC(transformer.Transformer):
             if "encdec_attention" in layer_key and (not layer_key.endswith("/logits"))
         ]
         attentions = tf.stack(attention_list)
-        attentions = tf.reduce_mean(attentions, [0])
+        attentions = attentions[-1]
 
         b_size, n_heads, trg_len, inp_len = common_layers.shape_list(attentions)
         pad_length = hparams.max_length - inp_len
