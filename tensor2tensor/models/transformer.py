@@ -2053,6 +2053,7 @@ def transformer_tall_pretrain_lm():
   hparams.learning_rate_constant = 2e-4
   hparams.learning_rate_schedule = ("linear_warmup*constant*cosdecay")
   hparams.optimizer = "adam_w"
+  hparams.weight_decay = 0.01 * hparams.learning_rate_constant
   hparams.optimizer_adam_beta1 = 0.9
   hparams.optimizer_adam_beta2 = 0.999
   hparams.optimizer_adam_epsilon = 1e-8
@@ -2098,6 +2099,7 @@ def transformer_tall_pretrain_lm_tpu():
   hparams.learning_rate_constant = 2e-4
   hparams.learning_rate_schedule = ("linear_warmup * constant * cosdecay")
   hparams.optimizer = "adam_w"
+  hparams.weight_decay = 0.01 * hparams.learning_rate_constant
   return hparams
 
 
@@ -2715,6 +2717,17 @@ def transformer_librispeech_tpu_v2():
 
   hparams.batch_size = 16
   librispeech.set_librispeech_length_hparams(hparams)
+  return hparams
+
+
+@registry.register_hparams
+def transformer_librispeech_with_area_attention():
+  """HParams for training ASR model on Librispeech on TPU v2."""
+  hparams = transformer_librispeech_tpu_v2()
+  hparams.num_area_layers = 3  # area attn on first 3 encoder and decoder layers
+  hparams.max_area_width = 5
+  hparams.area_key_mode = "concat"
+  hparams.area_value_mode = "sum"
   return hparams
 
 
