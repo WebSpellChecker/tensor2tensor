@@ -286,8 +286,12 @@ class TransformerWSC(transformer.Transformer):
         span_input = tf.reshape(tf.transpose(attentions, [0, 2, 1, 3]),
                                 [b_size, trg_len, hparams.max_length * self.hparams.num_heads])
         span_input = common_layers.layer_preprocess(span_input, hparams)
-        span_logits = common_layers.dense(span_input, hparams.max_length, name='span_dense')
-        # span_logits = common_layers.layer_postprocess(None, span_logits, hparams)
+        span_logits = common_layers.dense_relu_dense(
+            span_input,
+            hparams.filter_size,
+            hparams.max_length,
+            dropout=hparams.relu_dropout)
+        span_logits = common_layers.layer_preprocess(span_logits, hparams)
         return span_logits
 
     def get_decode_end_id(self):
