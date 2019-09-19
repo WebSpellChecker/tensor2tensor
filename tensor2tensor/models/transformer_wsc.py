@@ -521,7 +521,7 @@ class TransformerWSC(transformer.Transformer):
                   attentions, used for fast decoding.
             """
             alive_seq = tf.reshape(alive_seq, [batch_size * beam_size, decode_length + 1])
-            before_i = i - tf.where_v2(tf.equal(i, 0), tf.zeros_like(i), tf.ones_like(i))
+            before_i = i - tf.where(tf.equal(i, 0), tf.zeros_like(i), tf.ones_like(i))
             before_ids = tf.slice(alive_seq, [0, before_i], [batch_size * beam_size, 1])
 
             # ids = tf.reshape(ids[:,  -1:], [batch_size, beam_sqr, 1])
