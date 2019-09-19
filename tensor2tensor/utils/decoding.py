@@ -181,40 +181,43 @@ def decode_from_file(estimator,
     num_sentences = len(sorted_inputs)
     num_decode_batches = (num_sentences - 1) // decode_hp.batch_size + 1
 
-    if estimator.config.use_tpu:
-        length = getattr(hparams, "length", 0) or hparams.max_length
-        print('decoder input max length', length)
-        batch_ids = []
-        for line in sorted_inputs:
-            if has_input:
-                line = line.strip()
-                ids = inputs_vocab.encode(line)
-            else:
-                ids = targets_vocab.encode(line)
-            if len(ids) < length:
-                ids.extend([0] * (length - len(ids)))
-            else:
-                ids = ids[:length]
-            batch_ids.append(ids)
-        np_ids = np.array(batch_ids, dtype=np.int32)
+    #if estimator.config.use_tpu:
+    length = getattr(hparams, "length", 0) or hparams.max_length
+    print('decoder input max length', length)
+    batch_ids = []
+    for line in sorted_inputs:
+        if has_input:
+            line = line.strip()
+            ids = inputs_vocab.encode(line)
+        else:
+            ids = targets_vocab.encode(line)
+        if len(ids) < length:
+            ids.extend([0] * (length - len(ids)))
+        else:
+            ids = ids[:length]
+        batch_ids.append(ids)
+    np_ids = np.array(batch_ids, dtype=np.int32)
 
-        def input_fn(params):
+    def input_fn(params):
+        if 'batch_size' in params:
             batch_size = params["batch_size"]
-            dataset = tf.data.Dataset.from_tensor_slices({"inputs": np_ids})
-            dataset = dataset.map(
-                lambda ex: {"inputs": tf.reshape(ex["inputs"], (length, 1, 1))})
-            dataset = dataset.batch(batch_size)
-            return dataset
-    else:
-        def input_fn():
-            input_gen = _decode_batch_input_fn(
-                num_decode_batches, sorted_inputs,
-                inputs_vocab, decode_hp.batch_size,
-                decode_hp.max_input_size,
-                task_id=decode_hp.multiproblem_task_id, has_input=has_input)
-            gen_fn = make_input_fn_from_generator(input_gen)
-            example = gen_fn()
-            return _decode_input_tensor_to_features_dict(example, hparams)
+        else:
+            batch_size = decode_hp.batch_size
+        dataset = tf.data.Dataset.from_tensor_slices({"inputs": np_ids})
+        dataset = dataset.map(
+            lambda ex: {"inputs": tf.reshape(ex["inputs"], (length, 1, 1))})
+        dataset = dataset.batch(batch_size)
+        return dataset
+    # else:
+    #     def input_fn():
+    #         input_gen = _decode_batch_input_fn(
+    #             num_decode_batches, sorted_inputs,
+    #             inputs_vocab, decode_hp.batch_size,
+    #             decode_hp.max_input_size,
+    #             task_id=decode_hp.multiproblem_task_id, has_input=has_input)
+    #         gen_fn = make_input_fn_from_generator(input_gen)
+    #         example = gen_fn()
+    #         return _decode_input_tensor_to_features_dict(example, hparams)
     decodes = []
     result_iter = estimator.predict(input_fn, checkpoint_path=checkpoint_path)
 

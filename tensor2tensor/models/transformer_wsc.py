@@ -31,6 +31,7 @@ import sys
 
 from six.moves import range  # pylint: disable=redefined-builtin
 import tensorflow_probability as tfp
+import math
 
 from tensor2tensor.data_generators import librispeech
 from tensor2tensor.layers import common_attention
@@ -39,7 +40,7 @@ from tensor2tensor.layers import common_layers
 from tensor2tensor.layers import modalities
 from tensor2tensor.layers import transformer_layers
 from tensor2tensor.layers import transformer_memory
-from tensor2tensor.utils import beam_search
+from tensor2tensor.utils import beam_search_wsc as beam_search
 from tensor2tensor.utils import expert_utils
 from tensor2tensor.utils import mlperf_log
 from tensor2tensor.utils import registry
@@ -312,6 +313,54 @@ class TransformerWSC(transformer.Transformer):
 
         return ret, {"span_loss": span_loss}
 
+    @classmethod
+    def estimator_model_fn(cls,
+                         hparams,
+                         features,
+                         labels,
+                         mode,
+                         config=None,
+                         params=None,
+                         decode_hparams=None,
+                         use_tpu=False):
+
+        inputs = features.get("inputs")
+        if inputs is None:
+            inputs = features["targets"]
+        shape = inputs.get_shape().as_list()
+        if shape[0] is None:
+            shape[0] = decode_hparams.batch_size or hparams.batch_size
+        if shape[1] is None:
+            shape[1] = hparams.max_input_seq_length or hparams.max_length
+        inputs.set_shape(shape)
+        _model_fn = super(transformer.Transformer, cls).estimator_model_fn(
+            hparams,
+            features,
+            labels,
+            mode,
+            config,
+            params,
+            decode_hparams,
+            use_tpu)
+        return _model_fn
+
+    def infer(self,
+              features=None,
+              decode_length=50,
+              beam_size=1,
+              top_beams=1,
+              alpha=0.0,
+              use_tpu=False):
+        self.prepare_features_for_infer(features)
+        self._fill_problem_hparams_features(features)
+        if self._problem_hparams:
+            target_modality = self._problem_hparams.modality["targets"]
+            if target_modality == modalities.ModalityType.CLASS_LABEL:
+                beam_size = 1  # No use to run beam-search for a single class.
+
+        results = self._beam_decode(features, decode_length, beam_size,
+                                    top_beams, alpha, use_tpu)
+        return results
 
     def _beam_decode(self,
                      features,
@@ -330,7 +379,6 @@ class TransformerWSC(transformer.Transformer):
                   None if using greedy decoding (beam_size=1)
           }
         """
-        beam_size = 1
         with tf.variable_scope(self.name, default_name="embedding"):
             return self._fast_decode_tpu(features, decode_length, beam_size,
                                      top_beams, alpha, use_tpu)
@@ -367,6 +415,7 @@ class TransformerWSC(transformer.Transformer):
         Raises:
           NotImplementedError: If there are multiple data shards.
         """
+        # Because we should procces combination of tokens * span predictions
         if self._num_datashards != 1:
             raise NotImplementedError("Fast decoding only supports a single shard.")
         if "targets_segmentation" in features:
@@ -455,9 +504,8 @@ class TransformerWSC(transformer.Transformer):
         if hparams.proximity_bias:
             decoder_self_attention_bias += common_attention.attention_bias_proximal(
                 decode_length)
-        beam_batch_size = beam_size * batch_size
 
-        def symbols_to_logits_tpu_fn(ids, i, cache):
+        def symbols_to_logits_tpu_fn(ids, span_ids, i, alive_seq, cache):
             """Go from ids to logits for next symbol on TPU.
 
             Args:
@@ -472,21 +520,27 @@ class TransformerWSC(transformer.Transformer):
               cache: A dict, containing tensors which are the results of previous
                   attentions, used for fast decoding.
             """
-            seq, spans = cache['seq'], cache['spans']
-            ids = tf.reshape(ids[:, -1:], [-1, 1])
-            before_ids = tf.slice(seq, [0, i], [beam_batch_size, 1])
+            alive_seq = tf.reshape(alive_seq, [batch_size * beam_size, decode_length + 1])
+            before_i = i - tf.where_v2(tf.equal(i, 0), tf.zeros_like(i), tf.ones_like(i))
+            before_ids = tf.slice(alive_seq, [0, before_i], [batch_size * beam_size, 1])
+
+            # ids = tf.reshape(ids[:,  -1:], [batch_size, beam_sqr, 1])
+            # ids = tf.slice(ids, [0, 0, 0], [batch_size, beam_size, 1])
+            # ids = tf.reshape(tf.tile(tf.expand_dims(ids, axis=2), [1, 1, beam_size, 1]), [batch_size, beam_sqr, 1])
+            # ids = tf.reshape(ids, [batch_size * beam_sqr, 1])
+            #
+            # span_ids = tf.reshape(span_ids[:,  -1:], [batch_size, beam_sqr, 1])
+            # span_ids = tf.slice(span_ids, [0, 0, 0], [batch_size, beam_size, 1])
+            # span_ids = tf.reshape(tf.transpose(tf.tile(tf.expand_dims(span_ids, axis=2), [1, 1, beam_size, 1]),
+            #                                    perm=[0, 2, 1, 3]), [batch_size, beam_sqr, 1])
+            # span_ids = tf.reshape(span_ids, [batch_size * beam_sqr, 1])
+
             is_span = tf.logical_or(tf.equal(ids, sep_id), tf.equal(before_ids, sep_id))
+            # if i == 0 than is_span == True
             is_span = tf.logical_or(is_span, tf.equal(i * tf.ones_like(ids), 1))
             is_span = tf.cast(is_span, dtype=tf.int32)
-
-            span = tf.slice(spans, [0, i], [beam_batch_size, 1])
-            spans = tf.transpose(spans)
-            spans = inplace_ops.alias_inplace_update(
-                spans, i, tf.squeeze(span * is_span, axis=1))
-            spans = tf.transpose(spans)
             targets = tf.expand_dims(tf.expand_dims(ids, axis=2), axis=3)
-
-            targets = preprocess_targets(targets, span, is_span, i)
+            targets = preprocess_targets(targets, span_ids, is_span, i)
 
             bias_shape = decoder_self_attention_bias.shape.as_list()
             bias = tf.slice(decoder_self_attention_bias, [0, 0, i, 0],
@@ -514,20 +568,9 @@ class TransformerWSC(transformer.Transformer):
             """Spans proccesing."""
             with tf.variable_scope("body"):
                 span_logits = self.get_span_logits(self.attention_weights)
-                next_span = tf.argmax(tf.nn.softmax(span_logits, axis=-1), axis=-1, output_type=tf.int32)
-                next_span = tf.reshape(next_span, [beam_batch_size, 1])
-                spans = tf.transpose(spans)
-                spans = inplace_ops.alias_inplace_update(
-                    spans, i + 1, tf.squeeze(next_span, axis=1))
-                spans = tf.transpose(spans)
-
+                span_logits = tf.reshape(span_logits, [-1, hparams.max_length])
             """"""
-            seq = tf.transpose(seq)
-            seq = inplace_ops.alias_inplace_update(
-                seq, i + 1, tf.squeeze(ids, axis=1))
-            seq = tf.transpose(seq)
-            cache['seq'], cache['spans'] = seq, spans
-            return ret, cache
+            return ret, span_logits, cache
 
         eos_id = self.get_decode_end_id() or beam_search.EOS_ID
         ret = fast_decode_tpu(
@@ -694,8 +737,7 @@ def fast_decode_tpu(encoder_output,
                           encoder_output, encoder_decoder_attention_bias,
                           scope_prefix)
     cache["encoder_output"] = encoder_output
-    cache["spans"] = tf.zeros([batch_size, decode_length + 1], dtype=tf.int32)
-    cache["seq"] = tf.zeros([batch_size, decode_length + 1], dtype=tf.int32)
+    cache["seq"] = tf.zeros([batch_size, decode_length], dtype=tf.int32)
 
     mlperf_log.transformer_print(
         key=mlperf_log.MODEL_HP_SEQ_BEAM_SEARCH,
@@ -709,32 +751,31 @@ def fast_decode_tpu(encoder_output,
         hparams=hparams)
     if beam_size > 1:  # Beam Search
         initial_ids = sos_id * tf.ones([batch_size], dtype=tf.int32)
-        decoded_ids, scores, res_cache = beam_search.beam_search(
+        decoded_ids, spans_ids, scores, res_cache = beam_search.beam_search(
             symbols_to_logits_fn,
             initial_ids,
             beam_size,
             decode_length,
             vocab_size,
+            hparams.max_length,
             alpha,
             states=cache,
             eos_id=eos_id,
             stop_early=(top_beams == 1),
-            use_tpu=use_tpu,
+            use_tpu=True,
             use_top_k_with_unique=use_top_k_with_unique)
 
-        spans = tf.reshape(res_cache["spans"], [batch_size, beam_size, decode_length + 1])
-        if top_beams == 1:
-            decoded_ids = decoded_ids[:, 0, 1:]
-            scores = scores[:, 0]
-            spans = spans[:, 0, :]
-        else:
-            decoded_ids = decoded_ids[:, :top_beams, 1:]
-            scores = scores[:, :top_beams]
-            spans = spans[:, :top_beams, 1:]
+        spans = tf.reshape(spans_ids, [batch_size, beam_size, decode_length + 1])
+
+        decoded_ids = decoded_ids[:, 0, 1:]
+        scores = scores[:, 0]
+        spans = spans[:, 0, 1:]
     else:
-        def inner_loop(i, hit_eos, next_id, decoded_ids, cache, log_prob):
+        def inner_loop(i, hit_eos, next_id, decoded_ids, span_ids, cache, log_prob):
             """One step of greedy decoding."""
-            logits, cache = symbols_to_logits_fn(next_id, i, cache)
+            span_id = tf.slice(span_ids, [0, i], [batch_size, 1])
+            logits, span_logits, cache = symbols_to_logits_fn(next_id, span_id, i, decoded_ids, cache)
+
             log_probs = common_layers.log_prob_from_logits(logits)
             temperature = getattr(hparams, "sampling_temp", 0.0)
             keep_top = getattr(hparams, "sampling_keep_top_k", -1)
@@ -758,7 +799,16 @@ def fast_decode_tpu(encoder_output,
             decoded_ids = inplace_ops.alias_inplace_update(
                 decoded_ids, i, tf.squeeze(next_id, axis=1))
             decoded_ids = tf.transpose(decoded_ids)
-            return i + 1, hit_eos, next_id, decoded_ids, cache, log_prob
+
+            next_span = common_layers.sample_with_temperature(
+                span_logits, temperature, keep_top)
+            next_span = tf.cast(next_span, dtype=tf.int32)
+            next_span = tf.expand_dims(next_span, axis=1)
+            span_ids = tf.transpose(span_ids)
+            span_ids = inplace_ops.alias_inplace_update(
+                span_ids, i, tf.squeeze(next_span, axis=1))
+            span_ids = tf.transpose(span_ids)
+            return i + 1, hit_eos, next_id, decoded_ids, span_ids, cache, log_prob
 
         def is_not_finished(i, hit_eos, *_):
             finished = i >= decode_length
@@ -766,7 +816,8 @@ def fast_decode_tpu(encoder_output,
                 finished |= tf.reduce_all(hit_eos)
             return tf.logical_not(finished)
 
-        decoded_ids = tf.zeros([batch_size, decode_length], dtype=tf.int32)
+        decoded_ids = tf.zeros([batch_size, decode_length + 1], dtype=tf.int32)
+        spans_ids = tf.zeros([batch_size, decode_length + 1], dtype=tf.int32)
         hit_eos = tf.fill([batch_size], False)
         next_id = sos_id * tf.ones([batch_size, 1], dtype=tf.int32)
         initial_log_prob = tf.zeros([batch_size], dtype=tf.float32)
@@ -775,21 +826,20 @@ def fast_decode_tpu(encoder_output,
             return tf.TensorShape(tensor.shape.as_list())
 
         bs_shape = batch_size if isinstance(batch_size, int) else None
-        _, _, _, decoded_ids, res_cache, log_prob = tf.while_loop(
+        _, _, _, decoded_ids, spans, res_cache, log_prob = tf.while_loop(
             is_not_finished,
             inner_loop, [
-                tf.constant(0), hit_eos, next_id, decoded_ids, cache,
+                tf.constant(0), hit_eos, next_id, decoded_ids, spans_ids, cache,
                 initial_log_prob
             ],
             shape_invariants=[
                 tf.TensorShape([]),
                 tf.TensorShape([bs_shape]),
                 tf.TensorShape([bs_shape, 1]),
-                tf.TensorShape([bs_shape, decode_length]),
+                tf.TensorShape([bs_shape, decode_length + 1]),
+                tf.TensorShape([bs_shape, decode_length + 1]),
                 nest.map_structure(compute_cache_shape_invariants, cache),
                 tf.TensorShape([bs_shape]),
             ])
-        spans = tf.reshape(res_cache["spans"], [batch_size, decode_length + 1])
-        spans = spans[:, 1:]
         scores = log_prob
     return {"outputs": decoded_ids, "scores": scores, "spans": spans}

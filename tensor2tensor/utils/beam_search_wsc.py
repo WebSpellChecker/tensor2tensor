@@ -398,6 +398,7 @@ def beam_search(symbols_to_logits_fn,
                 beam_size,
                 decode_length,
                 vocab_size,
+                span_vocab_size,
                 alpha,
                 states=None,
                 eos_id=EOS_ID,
@@ -457,20 +458,15 @@ def beam_search(symbols_to_logits_fn,
 
   # Assume initial_ids are prob 1.0
   initial_log_probs = tf.constant([[0.] + [-INF] * (beam_size - 1)])
-  span_initial_log_probs = tf.constant([[0.] + [-INF] * (beam_size - 1)])
   # Expand to beam_size (batch_size, beam_size)
   alive_log_probs = tf.tile(initial_log_probs, [batch_size, 1])
-  span_alive_log_probs = tf.tile(span_initial_log_probs, [batch_size, 1])
 
   # Expand each batch and state to beam_size
   alive_seq = _expand_to_beam_size(initial_ids, beam_size)
   alive_seq = tf.expand_dims(alive_seq, axis=2)  # (batch_size, beam_size, 1)
-
-  span_alive_seq = _expand_to_beam_size(tf.zeros_like(initial_ids), beam_size)
-  span_alive_seq = tf.expand_dims(span_alive_seq, axis=2)  # (batch_size, beam_size, 1)
   if use_tpu:
     alive_seq = tf.tile(alive_seq, [1, 1, decode_length + 1])
-    span_alive_seq = tf.tile(span_alive_seq, [1, 1, decode_length + 1])
+    alive_span_seq = tf.zeros_like(alive_seq)
   if states:
     states = nest.map_structure(
         lambda state: _expand_to_beam_size(state, beam_size), states)
@@ -481,12 +477,13 @@ def beam_search(symbols_to_logits_fn,
   # Finished log probs will be negative infinity in the beginning
   # finished_flags will keep track of booleans
   finished_seq = tf.zeros(common_layers.shape_list(alive_seq), tf.int32)
+  spans_finished_seq = tf.zeros(common_layers.shape_list(alive_seq), tf.int32)
   # Setting the scores of the initial to negative infinity.
   finished_scores = tf.ones([batch_size, beam_size]) * -INF
   finished_flags = tf.zeros([batch_size, beam_size], tf.bool)
 
-  def grow_finished(finished_seq, finished_scores, finished_flags, curr_seq,
-                    curr_scores, curr_finished):
+  def grow_finished(finished_seq, spans_finished_seq, finished_scores, finished_flags, curr_seq, span_topk_seq,
+                    curr_scores, span_topk_scores, curr_finished):
     """Given sequences and scores, will gather the top k=beam size sequences.
 
     Args:
@@ -521,7 +518,9 @@ def beam_search(symbols_to_logits_fn,
     curr_finished_seq = tf.concat([finished_seq, curr_seq], axis=1)
     curr_finished_scores = tf.concat([finished_scores, curr_scores], axis=1)
     curr_finished_flags = tf.concat([finished_flags, curr_finished], axis=1)
-    return compute_topk_scores_and_seq(
+
+    curr_span_finished_seq = tf.concat([spans_finished_seq, span_topk_seq], axis=1)
+    finished_seq, finished_scores, finished_flags, _ = compute_topk_scores_and_seq(
         curr_finished_seq,
         curr_finished_scores,
         curr_finished_scores,
@@ -532,7 +531,19 @@ def beam_search(symbols_to_logits_fn,
         use_tpu=use_tpu,
         use_top_k_with_unique=use_top_k_with_unique)
 
-  def grow_alive(curr_seq, curr_scores, curr_log_probs, curr_finished, states):
+    spans_finished_seq, _, _, _ = compute_topk_scores_and_seq(
+        curr_span_finished_seq,
+        curr_finished_scores,
+        curr_finished_scores,
+        curr_finished_flags,
+        beam_size,
+        batch_size,
+        "span_grow_finished",
+        use_tpu=use_tpu,
+        use_top_k_with_unique=use_top_k_with_unique)
+    return finished_seq, spans_finished_seq, finished_scores, finished_flags, _
+
+  def grow_alive(curr_seq, span_topk_seq, curr_scores, span_curr_scores, curr_log_probs, curr_finished, states):
     """Given sequences and scores, will gather the top k=beam size sequences.
 
     Args:
@@ -553,11 +564,19 @@ def beam_search(symbols_to_logits_fn,
     # Set the scores of the finished seq in curr_seq to large negative
     # values
     curr_scores += tf.to_float(curr_finished) * -INF
-    return compute_topk_scores_and_seq(curr_seq, curr_scores, curr_log_probs,
+    span_curr_scores += tf.to_float(curr_finished) * -INF
+    topk_seq, topk_gathered_scores, topk_flags, topk_gathered_states = compute_topk_scores_and_seq(
+                                       curr_seq, curr_scores, curr_log_probs,
                                        curr_finished, beam_size, batch_size,
                                        "grow_alive", states, use_tpu=use_tpu)
+    span_topk_seq, _, _, _ = compute_topk_scores_and_seq(
+      span_topk_seq, span_curr_scores, curr_log_probs,
+      curr_finished, beam_size, batch_size,
+      "span_grow_alive", None, use_tpu=use_tpu)
 
-  def grow_topk(i, alive_seq, alive_log_probs, span_alive_seq, span_alive_log_probs, states):
+    return topk_seq, span_topk_seq, topk_gathered_scores, topk_flags, topk_gathered_states
+
+  def grow_topk(i, alive_seq, alive_span_seq, alive_log_probs, states):
     r"""Inner beam search loop.
 
     This function takes the current alive sequences, and grows them to topk
@@ -588,17 +607,16 @@ def beam_search(symbols_to_logits_fn,
       flat_ids = tf.reshape(
           tf.slice(alive_seq, [0, 0, i], [batch_size, beam_size, 1]),
           [batch_size * beam_size, -1])
-      span_flat_ids = tf.reshape(
-        tf.slice(span_alive_seq, [0, 0, i], [batch_size, beam_size, 1]),
-        [batch_size * beam_size, -1])
+      span_ids = tf.reshape(
+          tf.slice(alive_span_seq, [0, 0, i], [batch_size, beam_size, 1]),
+          [batch_size * beam_size, -1])
     else:
       flat_ids = tf.reshape(alive_seq, [batch_size * beam_size, -1])
-      span_flat_ids = tf.reshape(span_alive_seq, [batch_size * beam_size, -1])
 
     # (batch_size * beam_size, decoded_length)
     if states:
       flat_states = nest.map_structure(_merge_beam_dim, states)
-      flat_logits, flat_span_logits, flat_states = symbols_to_logits_fn(flat_ids, span_flat_ids, i, flat_states)
+      flat_logits, flat_span_logits, flat_states = symbols_to_logits_fn(flat_ids, span_ids, i, alive_seq, flat_states)
       states = nest.map_structure(
           lambda t: _unmerge_beam_dim(t, batch_size, beam_size), flat_states)
     elif use_tpu:
@@ -616,7 +634,7 @@ def beam_search(symbols_to_logits_fn,
     # Multiply the probabilities by the current probabilities of the beam.
     # (batch_size, beam_size, vocab_size) + (batch_size, beam_size, 1)
     log_probs = candidate_log_probs + tf.expand_dims(alive_log_probs, axis=2)
-    span_log_probs = candidate_span_log_probs + tf.expand_dims(span_alive_log_probs, axis=2)
+    span_log_probs = candidate_span_log_probs
 
     length_penalty = tf.pow(((5. + tf.to_float(i + 1)) / 6.), alpha)
 
@@ -624,76 +642,48 @@ def beam_search(symbols_to_logits_fn,
     span_curr_scores = span_log_probs / length_penalty
     # Flatten out (beam_size, vocab_size) probs in to a list of possibilities
     flat_curr_scores = tf.reshape(curr_scores, [-1, beam_size * vocab_size])
-    span_flat_curr_scores = tf.reshape(span_curr_scores, [-1, beam_size * vocab_size])
+    flat_span_curr_scores = tf.reshape(span_curr_scores, [-1, beam_size * span_vocab_size])
 
     if use_tpu and use_top_k_with_unique:
       topk_scores, topk_ids = top_k_with_unique(
           flat_curr_scores, k=beam_size * 2)
       span_topk_scores, span_topk_ids = top_k_with_unique(
-        span_flat_curr_scores, k=beam_size * 2)
+        flat_span_curr_scores, k=beam_size * 2)
     else:
       topk_scores, topk_ids = tf.nn.top_k(flat_curr_scores, k=beam_size * 2)
-      span_topk_scores, span_topk_ids = tf.nn.top_k(span_flat_curr_scores, k=beam_size * 2)
+      span_topk_scores, span_topk_ids = tf.nn.top_k(flat_span_curr_scores, k=beam_size * 2)
 
     # Recovering the log probs because we will need to send them back
     topk_log_probs = topk_scores * length_penalty
-    span_topk_log_probs = span_topk_scores * length_penalty
-
     # Work out what beam the top probs are in.
     topk_beam_index = topk_ids // vocab_size
     topk_ids %= vocab_size  # Unflatten the ids
-    span_topk_beam_index = span_topk_ids // vocab_size
-    span_topk_ids %= vocab_size  # Unflatten the ids
 
-    if not use_tpu:
-      # The next three steps are to create coordinates for tf.gather_nd to pull
-      # out the correct sequences from id's that we need to grow.
-      # We will also use the coordinates to gather the booleans of the beam
-      # items that survived.
-      batch_pos = compute_batch_indices(batch_size, beam_size * 2)
+    topk_span_beam_index = span_topk_ids // span_vocab_size
+    span_topk_ids %= span_vocab_size
+    # Gather up the most probable 2*beams both for the ids and
+    # finished_in_alive bools
+    topk_seq = fast_tpu_gather(alive_seq, topk_beam_index)
+    span_topk_seq = fast_tpu_gather(alive_span_seq, topk_span_beam_index)
 
-      # top beams will give us the actual coordinates to do the gather.
-      # stacking will create a tensor of dimension batch * beam * 2, where the
-      # last dimension contains the i,j gathering coordinates.
-      topk_coordinates = tf.stack([batch_pos, topk_beam_index], axis=2)
-      span_topk_coordinates = tf.stack([batch_pos, span_topk_beam_index], axis=2)
+    if states:
+      states = nest.map_structure(
+          lambda state: fast_tpu_gather(state, topk_beam_index), states)
 
-      # Gather up the most probable 2*beams both for the ids and
-      # finished_in_alive bools
-      topk_seq = tf.gather_nd(alive_seq, topk_coordinates)
-      span_topk_seq = tf.gather_nd(span_alive_seq, span_topk_coordinates)
-      if states:
-        states = nest.map_structure(
-            lambda state: tf.gather_nd(state, topk_coordinates), states)
+    # Update the most probable alive
+    topk_seq = tf.transpose(topk_seq, perm=[2, 0, 1])
+    topk_seq = inplace_ops.alias_inplace_update(topk_seq, i + 1, topk_ids)
+    topk_seq = tf.transpose(topk_seq, perm=[1, 2, 0])
 
-      # Append the most probable alive
-      topk_seq = tf.concat([topk_seq, tf.expand_dims(topk_ids, axis=2)], axis=2)
-      span_topk_seq = tf.concat([span_topk_seq, tf.expand_dims(span_topk_ids, axis=2)], axis=2)
-    else:
-      # Gather up the most probable 2*beams both for the ids and
-      # finished_in_alive bools
-      topk_seq = fast_tpu_gather(alive_seq, topk_beam_index)
-      span_topk_seq = fast_tpu_gather(span_alive_seq, span_topk_beam_index)
-
-      if states:
-        states = nest.map_structure(
-            lambda state: fast_tpu_gather(state, topk_beam_index), states)
-
-      # Update the most probable alive
-      topk_seq = tf.transpose(topk_seq, perm=[2, 0, 1])
-      topk_seq = inplace_ops.alias_inplace_update(topk_seq, i + 1, topk_ids)
-      topk_seq = tf.transpose(topk_seq, perm=[1, 2, 0])
-
-      span_topk_seq = tf.transpose(span_topk_seq, perm=[2, 0, 1])
-      span_topk_seq = inplace_ops.alias_inplace_update(span_topk_seq, i + 1, span_topk_ids)
-      span_topk_seq = tf.transpose(span_topk_seq, perm=[1, 2, 0])
+    span_topk_seq = tf.transpose(span_topk_seq, perm=[2, 0, 1])
+    span_topk_seq = inplace_ops.alias_inplace_update(span_topk_seq, i + 1, span_topk_ids)
+    span_topk_seq = tf.transpose(span_topk_seq, perm=[1, 2, 0])
 
     topk_finished = tf.equal(topk_ids, eos_id)
 
-    return topk_seq, topk_log_probs, topk_scores,\
-           span_topk_seq, span_topk_log_probs, span_topk_scores, topk_finished, states
+    return topk_seq, span_topk_seq, topk_log_probs, topk_scores, span_topk_scores, topk_finished, states
 
-  def inner_loop(i, alive_seq, alive_log_probs, span_alive_seq, span_alive_log_probs, finished_seq, finished_scores,
+  def inner_loop(i, alive_seq, alive_span_seq, alive_log_probs, finished_seq, spans_finished_seq, finished_scores,
                  finished_flags, states):
     """Inner beam search loop.
 
@@ -743,20 +733,97 @@ def beam_search(symbols_to_logits_fn,
     # 1. Get the current topk items.
     # 2. Extract the ones that have finished and haven't finished
     # 3. Recompute the contents of finished based on scores.
-    topk_seq, topk_log_probs, topk_scores,\
-    span_topk_seq, span_topk_log_probs, span_topk_scores, topk_finished, states = grow_topk(
-        i, alive_seq, alive_log_probs, span_alive_seq, span_alive_log_probs, states)
-    alive_seq, alive_log_probs, _, states = grow_alive(
-        topk_seq, topk_scores, topk_log_probs, topk_finished, states)
-    finished_seq, finished_scores, finished_flags, _ = grow_finished(
-        finished_seq, finished_scores, finished_flags, topk_seq, topk_scores,
-        topk_finished)
+    # """Diagnostic"""
+    # print_op = tf.print("alive_seq:", alive_seq, summarize=10)
+    # with tf.control_dependencies([print_op]):
+    #   alive_seq = alive_seq + alive_seq - alive_seq
+    #
+    # print_op = tf.print("alive_log_probs:", alive_log_probs, summarize=10)
+    # with tf.control_dependencies([print_op]):
+    #   alive_log_probs = alive_log_probs + alive_log_probs - alive_log_probs
+    # """"""
 
-    return (i + 1, alive_seq, alive_log_probs, finished_seq, finished_scores,
+    topk_seq, span_topk_seq, topk_log_probs, topk_scores, span_topk_scores, topk_finished, states = grow_topk(
+        i, alive_seq, alive_span_seq, alive_log_probs, states)
+
+
+    # """Diagnostic"""
+    # print_op = tf.print("topk_seq:", topk_seq, summarize=10)
+    # with tf.control_dependencies([print_op]):
+    #   topk_seq = topk_seq + topk_seq - topk_seq
+    #
+    # print_op = tf.print("topk_log_probs:", topk_log_probs, summarize=10)
+    # with tf.control_dependencies([print_op]):
+    #   topk_log_probs = topk_log_probs + topk_log_probs - topk_log_probs
+    #
+    # print_op = tf.print("topk_scores:", topk_scores, summarize=10)
+    # with tf.control_dependencies([print_op]):
+    #   topk_scores = topk_scores + topk_scores - topk_scores
+    #
+    # print_op = tf.print("span_topk_seq:", span_topk_seq, summarize=10)
+    # with tf.control_dependencies([print_op]):
+    #   span_topk_seq = span_topk_seq + span_topk_seq - span_topk_seq
+    #
+    # print_op = tf.print("span_topk_scores:", span_topk_scores, summarize=10)
+    # with tf.control_dependencies([print_op]):
+    #   span_topk_scores = span_topk_scores + span_topk_scores - span_topk_scores
+    #
+    # topk_finished = tf.cast(topk_finished, dtype=tf.int32)
+    # print_op = tf.print("topk_finished:", topk_finished, summarize=10)
+    # with tf.control_dependencies([print_op]):
+    #   topk_finished = topk_finished + topk_finished - topk_finished
+    # topk_finished = tf.cast(topk_finished, dtype=tf.bool)
+    # """"""
+
+
+    alive_seq, alive_span_seq, alive_log_probs, _, states = grow_alive(
+        topk_seq, span_topk_seq, topk_scores, span_topk_scores, topk_log_probs, topk_finished, states)
+
+
+    # """Diagnostic"""
+    # print_op = tf.print("alive_seq2:", alive_seq, summarize=10)
+    # with tf.control_dependencies([print_op]):
+    #   alive_seq = alive_seq + alive_seq - alive_seq
+    #
+    # print_op = tf.print("alive_log_probs2:", alive_log_probs, summarize=10)
+    # with tf.control_dependencies([print_op]):
+    #   alive_log_probs = alive_log_probs + alive_log_probs - alive_log_probs
+    #
+    # print_op = tf.print("alive_span_seq2:", alive_span_seq, summarize=10)
+    # with tf.control_dependencies([print_op]):
+    #   alive_span_seq = alive_span_seq + alive_span_seq - alive_span_seq
+    # """"""
+
+
+    finished_seq, spans_finished_seq, finished_scores, finished_flags, _ = grow_finished(
+        finished_seq, spans_finished_seq, finished_scores, finished_flags, topk_seq, span_topk_seq,
+        topk_scores, span_topk_scores, topk_finished)
+
+
+    # """Diagnostic"""
+    # print_op = tf.print("finished_seq:", finished_seq, summarize=10)
+    # with tf.control_dependencies([print_op]):
+    #   finished_seq = finished_seq + finished_seq - finished_seq
+    #
+    # print_op = tf.print("spans_finished_seq:", spans_finished_seq, summarize=10)
+    # with tf.control_dependencies([print_op]):
+    #   spans_finished_seq = spans_finished_seq + spans_finished_seq - spans_finished_seq
+    #
+    # print_op = tf.print("finished_scores:", finished_scores, summarize=10)
+    # with tf.control_dependencies([print_op]):
+    #   finished_scores = finished_scores + finished_scores - finished_scores
+    #
+    # finished_flags = tf.cast(finished_flags, dtype=tf.int32)
+    # print_op = tf.print("finished_flags:", finished_flags, summarize=10)
+    # with tf.control_dependencies([print_op]):
+    #   finished_flags = finished_flags + finished_flags - finished_flags
+    # finished_flags = tf.cast(finished_flags, dtype=tf.bool)
+    # """"""
+    return (i + 1, alive_seq, alive_span_seq, alive_log_probs, finished_seq, spans_finished_seq, finished_scores,
             finished_flags, states)
 
-  def _is_finished(i, unused_alive_seq, alive_log_probs, unused_finished_seq,
-                   finished_scores, unused_finished_in_finished, unused_states):
+  def _is_not_finished(i, alive_seq, alive_span_seq, alive_log_probs, finished_seq, spans_finished_seq, finished_scores,
+                 finished_flags, states):
     """Checking termination condition.
 
     We terminate when we decoded up to decode_length or the lowest scoring item
@@ -810,21 +877,19 @@ def beam_search(symbols_to_logits_fn,
     state_struc = nest.map_structure(lambda state: state.get_shape(), states)
   else:
     state_struc = nest.map_structure(get_state_shape_invariants, states)
-
-  (_, alive_seq, alive_log_probs,
-      span_alive_seq, span_alive_log_probs,
-   finished_seq, finished_scores, finished_flags, states) = tf.while_loop(
-       _is_finished,
+  (_, alive_seq, alive_span_seq, alive_log_probs, finished_seq, spans_finished_seq, finished_scores,
+   finished_flags, states) = tf.while_loop(
+       _is_not_finished,
        inner_loop, [
-           tf.constant(0), alive_seq, alive_log_probs, span_alive_seq, span_alive_log_probs,
-          finished_seq, finished_scores, finished_flags, states
+           tf.constant(0), alive_seq, alive_span_seq, alive_log_probs, finished_seq, spans_finished_seq,
+           finished_scores, finished_flags, states
        ],
        shape_invariants=[
            tf.TensorShape([]),
            inner_shape,
+           inner_shape,
            alive_log_probs.get_shape(),
            inner_shape,
-           span_alive_log_probs.get_shape(),
            inner_shape,
            finished_scores.get_shape(),
            finished_flags.get_shape(),
@@ -835,6 +900,7 @@ def beam_search(symbols_to_logits_fn,
 
   alive_seq.set_shape((None, beam_size, None))
   finished_seq.set_shape((None, beam_size, None))
+  spans_finished_seq.set_shape((None, beam_size, None))
 
   # Accounting for corner case: It's possible that no sequence in alive for a
   # particular batch item ever reached EOS. In that case, we should just copy
@@ -843,6 +909,8 @@ def beam_search(symbols_to_logits_fn,
   # to do the same for the scores as well.
   finished_seq = tf.where(
       tf.reduce_any(finished_flags, 1), finished_seq, alive_seq)
+  spans_finished_seq = tf.where(
+      tf.reduce_any(finished_flags, 1), spans_finished_seq, alive_span_seq)
   finished_scores = tf.where(
       tf.reduce_any(finished_flags, 1), finished_scores, alive_log_probs)
-  return finished_seq, finished_scores, states
+  return finished_seq, spans_finished_seq, finished_scores, states
