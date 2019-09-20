@@ -480,9 +480,11 @@ def beam_search(symbols_to_logits_fn,
   spans_finished_seq = tf.zeros(common_layers.shape_list(alive_seq), tf.int32)
   # Setting the scores of the initial to negative infinity.
   finished_scores = tf.ones([batch_size, beam_size]) * -INF
+  span_finished_scores = tf.ones([batch_size, beam_size]) * -INF
   finished_flags = tf.zeros([batch_size, beam_size], tf.bool)
 
-  def grow_finished(finished_seq, spans_finished_seq, finished_scores, finished_flags, curr_seq, span_topk_seq,
+  def grow_finished(finished_seq, spans_finished_seq, finished_scores, span_finished_scores,
+                    finished_flags, curr_seq, span_topk_seq,
                     curr_scores, span_topk_scores, curr_finished):
     """Given sequences and scores, will gather the top k=beam size sequences.
 
@@ -514,12 +516,14 @@ def beam_search(symbols_to_logits_fn,
     # Set the scores of the unfinished seq in curr_seq to large negative
     # values
     curr_scores += (1. - tf.to_float(curr_finished)) * -INF
+    curr_scores = curr_scores + span_topk_scores
     # concatenating the sequences and scores along beam axis
     curr_finished_seq = tf.concat([finished_seq, curr_seq], axis=1)
     curr_finished_scores = tf.concat([finished_scores, curr_scores], axis=1)
     curr_finished_flags = tf.concat([finished_flags, curr_finished], axis=1)
 
     curr_span_finished_seq = tf.concat([spans_finished_seq, span_topk_seq], axis=1)
+
     finished_seq, finished_scores, finished_flags, _ = compute_topk_scores_and_seq(
         curr_finished_seq,
         curr_finished_scores,
@@ -541,7 +545,7 @@ def beam_search(symbols_to_logits_fn,
         "span_grow_finished",
         use_tpu=use_tpu,
         use_top_k_with_unique=use_top_k_with_unique)
-    return finished_seq, spans_finished_seq, finished_scores, finished_flags, _
+    return finished_seq, spans_finished_seq, finished_scores, finished_scores, finished_flags, _
 
   def grow_alive(curr_seq, span_topk_seq, curr_scores, span_curr_scores, curr_log_probs, curr_finished, states):
     """Given sequences and scores, will gather the top k=beam size sequences.
@@ -569,10 +573,11 @@ def beam_search(symbols_to_logits_fn,
                                        curr_seq, curr_scores, curr_log_probs,
                                        curr_finished, beam_size, batch_size,
                                        "grow_alive", states, use_tpu=use_tpu)
-    span_topk_seq, _, _, _ = compute_topk_scores_and_seq(
+    span_topk_seq, span_topk_gathered_scores, _, _ = compute_topk_scores_and_seq(
       span_topk_seq, span_curr_scores, curr_log_probs,
       curr_finished, beam_size, batch_size,
       "span_grow_alive", None, use_tpu=use_tpu)
+    topk_gathered_scores = topk_gathered_scores + span_topk_gathered_scores
 
     return topk_seq, span_topk_seq, topk_gathered_scores, topk_flags, topk_gathered_states
 
@@ -634,7 +639,7 @@ def beam_search(symbols_to_logits_fn,
     # Multiply the probabilities by the current probabilities of the beam.
     # (batch_size, beam_size, vocab_size) + (batch_size, beam_size, 1)
     log_probs = candidate_log_probs + tf.expand_dims(alive_log_probs, axis=2)
-    span_log_probs = candidate_span_log_probs
+    span_log_probs = candidate_span_log_probs + tf.expand_dims(alive_log_probs, axis=2)
 
     length_penalty = tf.pow(((5. + tf.to_float(i + 1)) / 6.), alpha)
 
@@ -684,7 +689,7 @@ def beam_search(symbols_to_logits_fn,
     return topk_seq, span_topk_seq, topk_log_probs, topk_scores, span_topk_scores, topk_finished, states
 
   def inner_loop(i, alive_seq, alive_span_seq, alive_log_probs, finished_seq, spans_finished_seq, finished_scores,
-                 finished_flags, states):
+                 span_finished_scores, finished_flags, states):
     """Inner beam search loop.
 
     There are three groups of tensors, alive, finished, and topk.
@@ -795,8 +800,9 @@ def beam_search(symbols_to_logits_fn,
     # """"""
 
 
-    finished_seq, spans_finished_seq, finished_scores, finished_flags, _ = grow_finished(
-        finished_seq, spans_finished_seq, finished_scores, finished_flags, topk_seq, span_topk_seq,
+    finished_seq, spans_finished_seq, finished_scores, span_finished_scores, finished_flags, _ = grow_finished(
+        finished_seq, spans_finished_seq, finished_scores, span_finished_scores,
+        finished_flags, topk_seq, span_topk_seq,
         topk_scores, span_topk_scores, topk_finished)
 
 
@@ -820,10 +826,10 @@ def beam_search(symbols_to_logits_fn,
     # finished_flags = tf.cast(finished_flags, dtype=tf.bool)
     # """"""
     return (i + 1, alive_seq, alive_span_seq, alive_log_probs, finished_seq, spans_finished_seq, finished_scores,
-            finished_flags, states)
+            span_finished_scores, finished_flags, states)
 
   def _is_not_finished(i, alive_seq, alive_span_seq, alive_log_probs, finished_seq, spans_finished_seq, finished_scores,
-                 finished_flags, states):
+                       span_finished_scores, finished_flags, states):
     """Checking termination condition.
 
     We terminate when we decoded up to decode_length or the lowest scoring item
@@ -878,11 +884,11 @@ def beam_search(symbols_to_logits_fn,
   else:
     state_struc = nest.map_structure(get_state_shape_invariants, states)
   (_, alive_seq, alive_span_seq, alive_log_probs, finished_seq, spans_finished_seq, finished_scores,
-   finished_flags, states) = tf.while_loop(
+   span_finished_scores, finished_flags, states) = tf.while_loop(
        _is_not_finished,
        inner_loop, [
            tf.constant(0), alive_seq, alive_span_seq, alive_log_probs, finished_seq, spans_finished_seq,
-           finished_scores, finished_flags, states
+           finished_scores, span_finished_scores, finished_flags, states
        ],
        shape_invariants=[
            tf.TensorShape([]),
@@ -891,6 +897,7 @@ def beam_search(symbols_to_logits_fn,
            alive_log_probs.get_shape(),
            inner_shape,
            inner_shape,
+           finished_scores.get_shape(),
            finished_scores.get_shape(),
            finished_flags.get_shape(),
            state_struc
