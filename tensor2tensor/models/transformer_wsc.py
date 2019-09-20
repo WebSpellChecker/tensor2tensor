@@ -797,7 +797,7 @@ def fast_decode_tpu(encoder_output,
             next_id = tf.expand_dims(next_id, axis=1)
             decoded_ids = tf.transpose(decoded_ids)
             decoded_ids = inplace_ops.alias_inplace_update(
-                decoded_ids, i, tf.squeeze(next_id, axis=1))
+                decoded_ids, i + 1, tf.squeeze(next_id, axis=1))
             decoded_ids = tf.transpose(decoded_ids)
 
             next_span = common_layers.sample_with_temperature(
@@ -806,7 +806,7 @@ def fast_decode_tpu(encoder_output,
             next_span = tf.expand_dims(next_span, axis=1)
             span_ids = tf.transpose(span_ids)
             span_ids = inplace_ops.alias_inplace_update(
-                span_ids, i, tf.squeeze(next_span, axis=1))
+                span_ids, i + 1, tf.squeeze(next_span, axis=1))
             span_ids = tf.transpose(span_ids)
             return i + 1, hit_eos, next_id, decoded_ids, span_ids, cache, log_prob
 
@@ -841,5 +841,7 @@ def fast_decode_tpu(encoder_output,
                 nest.map_structure(compute_cache_shape_invariants, cache),
                 tf.TensorShape([bs_shape]),
             ])
+        decoded_ids = decoded_ids[:, 1:]
+        spans = spans[:, 1:]
         scores = log_prob
     return {"outputs": decoded_ids, "scores": scores, "spans": spans}
